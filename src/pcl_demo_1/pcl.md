@@ -10,14 +10,19 @@ sudo apt install ros-${ROS_DISTRO}-pcl-ros ros-${ROS_DISTRO}-pcl-conversions lib
 
 ## 二、创建功能包
 ```bash
-cd ~/ros2_ws/src
-ros2 pkg create pcl_demo --build-type ament_cmake --dependencies rclcpp std_msgs sensor_msgs pcl_ros pcl_conversions
+cd ~/test_pcl/src
+ros2 pkg create pcl_demo_1 --build-type ament_cmake --dependencies rclcpp std_msgs sensor_msgs pcl_ros pcl_conversions
 ```
 ## 三、CMakeLists.txt 配置
 ```cmake
 cmake_minimum_required(VERSION 3.8)
-project(pcl_demo)
+project(pcl_demo_1)
 
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+# find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -30,37 +35,57 @@ include_directories(${PCL_INCLUDE_DIRS})
 link_directories(${PCL_LIBRARY_DIRS})
 add_definitions(${PCL_DEFINITIONS})
 
-add_executable(pcl_demo_node src/pcl_demo_node.cpp)
-ament_target_dependencies(pcl_demo_node
-  rclcpp
-  std_msgs
-  sensor_msgs
-  pcl_ros
-  pcl_conversions
-)
-target_link_libraries(pcl_demo_node ${PCL_LIBRARIES})
+add_executable(pcl_demo_1_node src/pcl_demo1_node.cpp)
+ament_target_dependencies(pcl_demo_1_node 
+  rclcpp 
+  std_msgs 
+  sensor_msgs 
+  pcl_ros 
+  pcl_conversions)
 
-install(TARGETS pcl_demo_node DESTINATION lib/${PROJECT_NAME})
+target_link_libraries(pcl_demo_1_node ${PCL_LIBRARIES})
+
+install(TARGETS
+  pcl_demo_1_node
+  DESTINATION lib/${PROJECT_NAME}) 
+
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  # the following line skips the linter which checks for copyrights
+  # comment the line when a copyright and license is added to all source files
+  set(ament_cmake_copyright_FOUND TRUE)
+  # the following line skips cpplint (only works in a git repo)
+  # comment the line when this package is in a git repo and when
+  # a copyright and license is added to all source files
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
+endif()
+
 ament_package()
 ```
 ## 四、package.xml 配置
 
 ```xml
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>pcl_demo</name>
-  <version>0.0.1</version>
-  <description>PCL point cloud demo for ROS2</description>
-  <maintainer email="user@example.com">user</maintainer>
-  <license>Apache-2.0</license>
+  <name>pcl_demo_1</name>
+  <version>0.0.0</version>
+  <description>TODO: Package description</description>
+  <maintainer email="2653439973@qq.com">sy</maintainer>
+  <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>pcl_ros</depend>
   <depend>pcl_conversions</depend>
   <depend>PCL</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
@@ -77,71 +102,74 @@ ament_package()
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/io/pcd_io.h>
-#include <pcl/visualization/cloud_viewer.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/common/random.h>
 
-#include <thread>
 #include <chrono>
+#include <memory>
+#include <cstdlib>   // for rand()
 
-class PCLDemoNode : public rclcpp::Node
+typedef pcl::PointXYZ PointT;
+
+class PCLDemo1Node : public rclcpp::Node
 {
 public:
-    PCLDemoNode() : Node("pcl_demo_node")
+    PCLDemo1Node() : Node("pcl_demo1_node")
     {
         RCLCPP_INFO(this->get_logger(), "PCL Demo Node Started");
 
-        // 1. 构建点云
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = createPointCloud();
+        // 1. 构建点云（保存为成员变量，供定时器反复使用）
+        cloud_ = createPointCloud();
 
-        // 2. 保存点云为PCD文件
-        savePointCloud(cloud, "demo_cloud.pcd");
+        // 2. 保存点云为 PCD 文件
+        savePointCloud(cloud_, "demo1_cloud.pcd");
 
-        // 3. 读取点云文件
-        pcl::PointCloud<pcl::PointXYZ>::Ptr loaded_cloud = loadPointCloud("demo_cloud.pcd");
+        // 3. 读取点云文件（演示）
+        pcl::PointCloud<PointT>::Ptr cloud_from_file = loadPointCloud("demo1_cloud.pcd");
+        // 这里我们仍使用 cloud_，但也可改用 cloud_from_file
 
-        // 4. 可视化点云（在独立线程中运行）
-        std::thread viewer_thread(&PCLDemoNode::visualizePointCloud, this, loaded_cloud);
+        // 4. 创建发布者
+        publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/point_cloud", 10);
 
-        // 5. 发布点云到ROS2话题（可选）
-        publishPointCloud(loaded_cloud);
+        // 5. 立即发布一次，让已经连接的订阅者收到
+        publishPointCloud(cloud_);
 
-        viewer_thread.join();
+        // 6. 创建定时器，每 1 秒发布一次，确保后启动的 rviz2 也能收到
+        timer_ = this->create_wall_timer(
+            std::chrono::seconds(1),
+            [this]() {
+                publishPointCloud(cloud_);
+            }
+        );
+
+        RCLCPP_INFO(this->get_logger(), "Node is spinning. Use rviz2 to visualize /pcl_demo1/point_cloud");
     }
 
 private:
-    /**
-     * 1. 构建点云 - 生成一个包含随机点和规则形状的点云
-     */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr createPointCloud()
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
+    rclcpp::TimerBase::SharedPtr timer_;
+    pcl::PointCloud<PointT>::Ptr cloud_;   // 保存点云供定时器使用
+
+    // 1. 构建点云：随机点 + 球面规则点
+    pcl::PointCloud<PointT>::Ptr createPointCloud()
     {
         RCLCPP_INFO(this->get_logger(), "Creating point cloud...");
+        pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>);
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-
-        // 设置点云尺寸
         cloud->width = 10000;
         cloud->height = 1;
         cloud->is_dense = false;
-        cloud->resize(cloud->width * cloud->height);
+        cloud->points.resize(cloud->width * cloud->height);
 
-        // 使用随机数生成器
-        pcl::common::CloudRandomGenerator<pcl::PointXYZ> random_gen;
-        random_gen.setSeed(42);
-
-        // 生成随机点云（分布在单位球体内）
-        for (size_t i = 0; i < cloud->size(); ++i)
+        for (size_t i = 0; i < cloud->points.size(); ++i)
         {
-            // 随机点
             float x = (rand() % 2000 - 1000) / 100.0f;
             float y = (rand() % 2000 - 1000) / 100.0f;
             float z = (rand() % 2000 - 1000) / 100.0f;
 
-            // 在球面上添加一些规则点，形成球形结构
+            // 前 500 个点构成球面
             if (i < 500)
             {
-                float theta = 2.0f * M_PI * i / 500;
-                float phi = M_PI * i / 500;
+                float theta = 2.0f * M_PI * i / 500.0f;
+                float phi = M_PI * i / 500.0f;
                 cloud->points[i].x = 5.0f * sin(phi) * cos(theta);
                 cloud->points[i].y = 5.0f * sin(phi) * sin(theta);
                 cloud->points[i].z = 5.0f * cos(phi);
@@ -154,109 +182,59 @@ private:
             }
         }
 
-        RCLCPP_INFO(this->get_logger(), "Created point cloud with %zu points", cloud->size());
+        RCLCPP_INFO(this->get_logger(), "Point cloud created with %zu points.", cloud->points.size());
         return cloud;
     }
 
-    /**
-     * 2. 保存点云为PCD文件
-     */
-    void savePointCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const std::string& filename)
+    // 2. 保存点云为 PCD 文件（二进制格式）
+    void savePointCloud(const pcl::PointCloud<PointT>::Ptr& cloud, const std::string& filename)
     {
         RCLCPP_INFO(this->get_logger(), "Saving point cloud to %s...", filename.c_str());
-
-        // 保存为二进制格式（更紧凑），也可使用 pcl::io::savePCDFileASCII
         int result = pcl::io::savePCDFileBinary(filename, *cloud);
-
         if (result == 0)
         {
-            RCLCPP_INFO(this->get_logger(), "Point cloud saved successfully to %s", filename.c_str());
+            RCLCPP_INFO(this->get_logger(), "Point cloud saved successfully to %s.", filename.c_str());
         }
         else
         {
-            RCLCPP_ERROR(this->get_logger(), "Failed to save point cloud to %s", filename.c_str());
+            RCLCPP_ERROR(this->get_logger(), "Failed to save point cloud to %s.", filename.c_str());
         }
     }
 
-    /**
-     * 3. 读取PCD文件
-     */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr loadPointCloud(const std::string& filename)
+    // 3. 读取点云文件
+    pcl::PointCloud<PointT>::Ptr loadPointCloud(const std::string& filename)
     {
         RCLCPP_INFO(this->get_logger(), "Loading point cloud from %s...", filename.c_str());
-
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-
-        int result = pcl::io::loadPCDFile<pcl::PointXYZ>(filename, *cloud);
-
+        pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>);
+        int result = pcl::io::loadPCDFile<PointT>(filename, *cloud);
         if (result == 0)
         {
-            RCLCPP_INFO(this->get_logger(), "Loaded point cloud with %zu points", cloud->size());
+            RCLCPP_INFO(this->get_logger(), "Point cloud loaded successfully from %s with %zu points.", filename.c_str(), cloud->points.size());
         }
         else
         {
-            RCLCPP_ERROR(this->get_logger(), "Failed to load point cloud from %s", filename.c_str());
-            // 返回空点云
+            RCLCPP_ERROR(this->get_logger(), "Failed to load point cloud from %s.", filename.c_str());
         }
-
         return cloud;
     }
 
-    /**
-     * 4. 可视化点云 - 使用PCL CloudViewer
-     */
-    void visualizePointCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
+    // 4. 发布点云到 ROS2 话题
+    void publishPointCloud(const pcl::PointCloud<PointT>::Ptr& cloud)
     {
-        if (cloud->empty())
-        {
-            RCLCPP_ERROR(this->get_logger(), "Cannot visualize empty point cloud");
-            return;
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Visualizing point cloud...");
-        RCLCPP_INFO(this->get_logger(), "Press 'q' in the viewer window to exit");
-
-        // 创建PCL可视化器
-        pcl::visualization::CloudViewer viewer("PCL Point Cloud Viewer");
-
-        // 显示点云
-        viewer.showCloud(cloud);
-
-        // 保持窗口打开直到用户按 'q' 退出
-        while (!viewer.wasStopped())
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        RCLCPP_INFO(this->get_logger(), "Viewer closed");
-    }
-
-    /**
-     * 5. 发布点云到ROS2话题（使用pcl::toROSMsg转换）
-     */
-    void publishPointCloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud)
-    {
-        // 创建发布者
-        auto publisher = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo_cloud", 10);
-
-        // 将PCL点云转换为ROS2消息格式
-        sensor_msgs::msg::PointCloud2 ros_cloud;
-        pcl::toROSMsg(*cloud, ros_cloud);
-
-        // 设置坐标系ID和时间戳
-        ros_cloud.header.frame_id = "map";
-        ros_cloud.header.stamp = this->now();
-
-        // 发布点云
-        publisher->publish(ros_cloud);
-        RCLCPP_INFO(this->get_logger(), "Published point cloud to topic /pcl_demo_cloud");
+        sensor_msgs::msg::PointCloud2 cloud_msg;
+        pcl::toROSMsg(*cloud, cloud_msg);
+        cloud_msg.header.frame_id = "map";
+        cloud_msg.header.stamp = this->now();
+        publisher_->publish(cloud_msg);
+        // 为减少日志输出，可注释掉下面一行
+        // RCLCPP_INFO(this->get_logger(), "Point cloud published.");
     }
 };
 
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<PCLDemoNode>();
+    auto node = std::make_shared<PCLDemo1Node>();
     rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;
@@ -265,10 +243,10 @@ int main(int argc, char** argv)
 ## 六、编译与运行
 
 ```bash
-cd ~/ros2_ws
-colcon build --packages-select pcl_demo
+cd ~/test_pcl
+colcon build --packages-select pcl_demo_1
 source install/setup.bash
-ros2 run pcl_demo pcl_demo_node
+ros2 run pcl_demo_1 pcl_demo1_node
 ```
 ##七、使用Rviz2可视化
 
