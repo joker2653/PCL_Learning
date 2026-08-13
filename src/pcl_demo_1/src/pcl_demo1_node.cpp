@@ -1,11 +1,11 @@
 // ============================================================================
 // 文件名: pcl_demo1_node.cpp
 // 描述: ROS2 节点，演示 PCL 点云的创建、保存、读取、发布，以及多种滤波、
-//       降采样、Kd‑tree 和 Octree（八叉树）的应用。
-//       共发布 1 个原始点云 + 10 个滤波结果 + 4 个降采样结果 = 15 个话题。
+//       降采样、Kd‑tree、Octree（八叉树）和关键点提取（SIFT, Harris, ISS, AGAST）的应用。
+//       共发布 1 个原始点云 + 10 个滤波结果 + 4 个降采样结果 + 4 个关键点 = 19 个话题。
 //       所有搜索结果（邻居索引、距离、变化点、压缩比等）打印在终端。
 // 作者: Auto Generated
-// 日期: 2026-08-11
+// 日期: 2026-08-13
 // ============================================================================
 
 // -------------------- ROS2 核心与消息头文件 --------------------
@@ -30,7 +30,7 @@
 #include <pcl/filters/crop_hull.h>                 // 裁剪凸包滤波
 #include <pcl/filters/frustum_culling.h>           // 视锥裁剪
 
-// -------------------- 降采样相关 (4 种，体素和近似体素已包含) --------------------
+// -------------------- 降采样相关 (4 种) --------------------
 #include <pcl/filters/uniform_sampling.h>          // 均匀采样（保留原始点）
 #include <pcl/filters/random_sample.h>             // 随机采样
 
@@ -40,11 +40,18 @@
 // -------------------- Octree 相关 --------------------
 #include <pcl/octree/octree_search.h>              // 八叉树搜索（体素内/K近邻/半径）
 #include <pcl/octree/octree_pointcloud_changedetector.h> // 空间变化检测
-#include <pcl/compression/octree_pointcloud_compression.h> // 点云压缩/解压（注意命名空间为 pcl::io）
+#include <pcl/compression/octree_pointcloud_compression.h> // 点云压缩/解压（命名空间 pcl::io）
+
+// -------------------- 关键点提取相关 (4 种) --------------------
+#include <pcl/keypoints/sift_keypoint.h>           // SIFT 关键点
+#include <pcl/keypoints/harris_3d.h>               // Harris3D 关键点
+#include <pcl/keypoints/iss_3d.h>                  // ISS 关键点
+#include <pcl/keypoints/agast_2d.h>                // AGAST 2D 关键点
 
 // -------------------- 辅助头文件 --------------------
 #include <pcl/ModelCoefficients.h>                 // 模型系数（用于投影）
 #include <pcl/surface/convex_hull.h>               // 凸包计算（用于裁剪凸包）
+#include <pcl/features/normal_3d.h>                // 法线计算（ISS 和 Harris 可能需要）
 
 #include <chrono>     // std::chrono 用于定时器
 #include <memory>     // std::shared_ptr
@@ -72,7 +79,7 @@ public:
         // 包含 500 个球面规则点 + 9500 个随机点，共 10000 点
         original_cloud_ = createPointCloud();
         // 保存原始点云为 PCD 文件（二进制格式，节省空间）
-        savePointCloud(original_cloud_, "original_cloud.pcd");
+        savePointCloud(*original_cloud_, "original_cloud.pcd");
 
         // 为了演示变化检测，创建一份带有噪声和新增点的副本
         pcl::PointCloud<PointT>::Ptr noisy_cloud = createNoisyCloud(original_cloud_);
@@ -100,16 +107,16 @@ public:
         filtered_frustum_        = filterFrustumCulling(original_cloud_);
 
         // 保存所有滤波结果到 PCD 文件，便于离线查看
-        savePointCloud(filtered_pass_through_,     "filtered_pass_through.pcd");
-        savePointCloud(filtered_conditional_,      "filtered_conditional.pcd");
-        savePointCloud(filtered_statistical_,      "filtered_statistical.pcd");
-        savePointCloud(filtered_radius_,           "filtered_radius.pcd");
-        savePointCloud(filtered_voxel_,            "filtered_voxel.pcd");
-        savePointCloud(filtered_approx_voxel_,     "filtered_approx_voxel.pcd");
-        savePointCloud(filtered_projection_,       "filtered_projection.pcd");
-        savePointCloud(filtered_crop_box_,         "filtered_crop_box.pcd");
-        savePointCloud(filtered_crop_hull_,        "filtered_crop_hull.pcd");
-        savePointCloud(filtered_frustum_,          "filtered_frustum.pcd");
+        savePointCloud(*filtered_pass_through_,     "filtered_pass_through.pcd");
+        savePointCloud(*filtered_conditional_,      "filtered_conditional.pcd");
+        savePointCloud(*filtered_statistical_,      "filtered_statistical.pcd");
+        savePointCloud(*filtered_radius_,           "filtered_radius.pcd");
+        savePointCloud(*filtered_voxel_,            "filtered_voxel.pcd");
+        savePointCloud(*filtered_approx_voxel_,     "filtered_approx_voxel.pcd");
+        savePointCloud(*filtered_projection_,       "filtered_projection.pcd");
+        savePointCloud(*filtered_crop_box_,         "filtered_crop_box.pcd");
+        savePointCloud(*filtered_crop_hull_,        "filtered_crop_hull.pcd");
+        savePointCloud(*filtered_frustum_,          "filtered_frustum.pcd");
 
         // ---------- 步骤3：应用 4 种降采样，获得降采样后的点云 ----------
         // 3.1 体素降采样：体素大小 0.2，用质心代表体素内点
@@ -122,24 +129,41 @@ public:
         downsampled_random_       = downsampleRandom(original_cloud_, 2000);
 
         // 保存所有降采样结果
-        savePointCloud(downsampled_voxel_,        "downsampled_voxel.pcd");
-        savePointCloud(downsampled_approx_voxel_, "downsampled_approx_voxel.pcd");
-        savePointCloud(downsampled_uniform_,      "downsampled_uniform.pcd");
-        savePointCloud(downsampled_random_,       "downsampled_random.pcd");
+        savePointCloud(*downsampled_voxel_,        "downsampled_voxel.pcd");
+        savePointCloud(*downsampled_approx_voxel_, "downsampled_approx_voxel.pcd");
+        savePointCloud(*downsampled_uniform_,      "downsampled_uniform.pcd");
+        savePointCloud(*downsampled_random_,       "downsampled_random.pcd");
 
-        // ---------- 步骤4：应用 Kd‑tree 搜索 ----------
-        // 构建 Kd‑tree，对随机查询点执行 K 近邻和半径搜索，结果打印到终端
+        // ---------- 步骤4：应用 4 种关键点提取 ----------
+        // 注意：SIFT 需要输入点云包含强度信息，因此先将 PointXYZ 转换为 PointXYZI
+        pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_xyzI = convertToXYZI(original_cloud_);
+        // 4.1 SIFT 关键点提取（输出为 PointWithScale，包含尺度和响应值）
+        keypoints_sift_ = extractSIFTKeypoints(cloud_xyzI);
+        // 4.2 Harris3D 关键点提取（输出为 PointXYZI，强度表示响应值）
+        keypoints_harris_ = extractHarrisKeypoints(original_cloud_);
+        // 4.3 ISS 关键点提取（输出为 PointXYZ）
+        keypoints_iss_ = extractISSKeypoints(original_cloud_);
+        // 4.4 AGAST 2D 关键点提取（输出为 PointUV，图像坐标）
+        keypoints_agast_ = extractAGASTKeypoints(original_cloud_);
+
+        // 保存关键点结果
+        savePointCloud(*keypoints_sift_,   "keypoints_sift.pcd");
+        savePointCloud(*keypoints_harris_, "keypoints_harris.pcd");
+        savePointCloud(*keypoints_iss_,    "keypoints_iss.pcd");
+        savePointCloud(*keypoints_agast_,  "keypoints_agast.pcd");
+
+        // ---------- 步骤5：应用 Kd‑tree 搜索 ----------
         performKdTreeSearch(original_cloud_);
 
-        // ---------- 步骤5：应用 Octree（八叉树） ----------
-        // 5.1 Octree 搜索：体素内搜索、K近邻、半径搜索
+        // ---------- 步骤6：应用 Octree（八叉树） ----------
+        // 6.1 Octree 搜索：体素内搜索、K近邻、半径搜索
         performOctreeSearch(original_cloud_);
-        // 5.2 Octree 空间变化检测：比较原始点云和带噪声点云，找出新增点
+        // 6.2 Octree 空间变化检测：比较原始点云和带噪声点云，找出新增点
         performOctreeChangeDetection(original_cloud_, noisy_cloud);
-        // 5.3 Octree 点云压缩：编码/解码，打印压缩比并保存解压结果
+        // 6.3 Octree 点云压缩：编码/解码，打印压缩比并保存解压结果
         performOctreeCompression(original_cloud_);
 
-        // ---------- 步骤6：创建 ROS2 发布者（共 15 个话题） ----------
+        // ---------- 步骤7：创建 ROS2 发布者（共 19 个话题） ----------
         // 原始点云
         pub_original_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/original", 10);
 
@@ -161,20 +185,24 @@ public:
         pub_down_uniform_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/down_uniform", 10);
         pub_down_random_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/down_random", 10);
 
-        // ---------- 步骤7：立即发布一次所有点云，并创建定时器每秒重复发布 ----------
-        // 立即发布，使已连接的订阅者（如 rviz2）能立刻看到数据
+        // 4 个关键点结果
+        pub_keypoints_sift_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/keypoints_sift", 10);
+        pub_keypoints_harris_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/keypoints_harris", 10);
+        pub_keypoints_iss_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/keypoints_iss", 10);
+        pub_keypoints_agast_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("pcl_demo1/keypoints_agast", 10);
+
+        // ---------- 步骤8：立即发布一次所有点云，并创建定时器每秒重复发布 ----------
         publishAllClouds();
-        // 创建定时器，每秒发布一次，保证后启动的 rviz2 也能收到
         timer_ = this->create_wall_timer(
             std::chrono::seconds(1),
             [this]() { publishAllClouds(); }
         );
 
-        // 打印提示信息，告知用户可订阅的话题
-        RCLCPP_INFO(this->get_logger(), "节点就绪。共发布 15 个话题（1原始 + 10滤波 + 4降采样）");
+        // 打印提示信息
+        RCLCPP_INFO(this->get_logger(), "节点就绪。共发布 19 个话题（1原始 + 10滤波 + 4降采样 + 4关键点）");
         RCLCPP_INFO(this->get_logger(), "滤波话题: /pcl_demo1/pass_through, conditional, statistical, radius, voxel, approx_voxel, projection, crop_box, crop_hull, frustum");
         RCLCPP_INFO(this->get_logger(), "降采样话题: /pcl_demo1/down_voxel, down_approx_voxel, down_uniform, down_random");
-        RCLCPP_INFO(this->get_logger(), "Kd‑tree 和 Octree 的搜索结果已打印在终端。");
+        RCLCPP_INFO(this->get_logger(), "关键点话题: /pcl_demo1/keypoints_sift, keypoints_harris, keypoints_iss, keypoints_agast");
     }
 
 private:
@@ -203,7 +231,13 @@ private:
     pcl::PointCloud<PointT>::Ptr downsampled_uniform_;
     pcl::PointCloud<PointT>::Ptr downsampled_random_;
 
-    // ---------- ROS2 发布者 (15 个) ----------
+    // ---------- 关键点结果 (4 个) ----------
+    pcl::PointCloud<pcl::PointWithScale>::Ptr keypoints_sift_;  // SIFT 关键点（含尺度）
+    pcl::PointCloud<pcl::PointXYZI>::Ptr keypoints_harris_;     // Harris 关键点（强度为响应值）
+    pcl::PointCloud<pcl::PointXYZ>::Ptr keypoints_iss_;         // ISS 关键点
+    pcl::PointCloud<pcl::PointUV>::Ptr keypoints_agast_;        // AGAST 关键点（2D 图像坐标）
+
+    // ---------- ROS2 发布者 (19 个) ----------
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_original_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_pass_through_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_conditional_;
@@ -219,12 +253,16 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_down_approx_voxel_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_down_uniform_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_down_random_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_keypoints_sift_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_keypoints_harris_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_keypoints_iss_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_keypoints_agast_;
 
     // ---------- 定时器 ----------
     rclcpp::TimerBase::SharedPtr timer_;
 
     // ========================================================================
-    // 辅助函数：创建、保存、加载点云
+    // 辅助函数：创建、保存、转换点云
     // ========================================================================
 
     /**
@@ -236,30 +274,27 @@ private:
     {
         RCLCPP_INFO(this->get_logger(), "创建原始点云...");
         pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>);
-        cloud->width = 10000;          // 总点数
-        cloud->height = 1;             // 无序点云
-        cloud->is_dense = false;       // 可能存在 NaN 或无效点
+        cloud->width = 10000;
+        cloud->height = 1;
+        cloud->is_dense = false;
         cloud->points.resize(cloud->width * cloud->height);
 
         for (size_t i = 0; i < cloud->points.size(); ++i)
         {
-            // 生成随机坐标（范围 -10 ~ 10）
             float x = (rand() % 2000 - 1000) / 100.0f;
             float y = (rand() % 2000 - 1000) / 100.0f;
             float z = (rand() % 2000 - 1000) / 100.0f;
 
-            // 前 500 个点替换为球面上的规则点（半径 5），形成可辨别的形状
             if (i < 500)
             {
-                float theta = 2.0f * M_PI * i / 500.0f;   // 方位角
-                float phi = M_PI * i / 500.0f;            // 极角
+                float theta = 2.0f * M_PI * i / 500.0f;
+                float phi = M_PI * i / 500.0f;
                 cloud->points[i].x = 5.0f * sin(phi) * cos(theta);
                 cloud->points[i].y = 5.0f * sin(phi) * sin(theta);
                 cloud->points[i].z = 5.0f * cos(phi);
             }
             else
             {
-                // 其余点使用随机值
                 cloud->points[i].x = x;
                 cloud->points[i].y = y;
                 cloud->points[i].z = z;
@@ -277,16 +312,13 @@ private:
      */
     pcl::PointCloud<PointT>::Ptr createNoisyCloud(const pcl::PointCloud<PointT>::Ptr& input)
     {
-        // 深拷贝原始点云
         pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>(*input));
-        // 随机修改 200 个点的位置（小幅度偏移）
         for (int i = 0; i < 200; ++i) {
             int idx = rand() % cloud->points.size();
             cloud->points[idx].x += (rand() % 100 - 50) / 100.0f;
             cloud->points[idx].y += (rand() % 100 - 50) / 100.0f;
             cloud->points[idx].z += (rand() % 100 - 50) / 100.0f;
         }
-        // 随机添加 100 个全新的点
         for (int i = 0; i < 100; ++i) {
             PointT p;
             p.x = (rand() % 2000 - 1000) / 100.0f;
@@ -300,36 +332,50 @@ private:
     }
 
     /**
-     * @brief 将点云保存为二进制 PCD 文件。
-     * @param cloud 点云智能指针
-     * @param filename 文件名（相对路径）
+     * @brief 模板化的点云保存函数，支持任意点类型。
+     *        参数为点云对象的 const 引用，方便类型推导。
+     * @tparam PointT_ 点类型
+     * @param cloud 点云对象引用
+     * @param filename 文件名
      */
-    void savePointCloud(const pcl::PointCloud<PointT>::Ptr& cloud, const std::string& filename)
+    template<typename PointT_>
+    void savePointCloud(const pcl::PointCloud<PointT_>& cloud, const std::string& filename)
     {
-        // 若点云为空则跳过保存
-        if (!cloud || cloud->empty())
+        if (cloud.empty())
         {
             RCLCPP_WARN(this->get_logger(), "跳过空点云 %s", filename.c_str());
             return;
         }
-        // 保存为二进制格式（节省空间，速度更快）
-        if (pcl::io::savePCDFileBinary(filename, *cloud) == 0)
-            RCLCPP_INFO(this->get_logger(), "保存 %s (%zu 点)", filename.c_str(), cloud->points.size());
+        if (pcl::io::savePCDFileBinary(filename, cloud) == 0)
+            RCLCPP_INFO(this->get_logger(), "保存 %s (%zu 点)", filename.c_str(), cloud.points.size());
         else
             RCLCPP_ERROR(this->get_logger(), "保存 %s 失败", filename.c_str());
     }
 
+    /**
+     * @brief 将 PointXYZ 点云转换为 PointXYZI（添加强度信息），SIFT 检测需要。
+     * @param input 输入 PointXYZ 点云
+     * @return 转换后的 PointXYZI 点云
+     */
+    pcl::PointCloud<pcl::PointXYZI>::Ptr convertToXYZI(const pcl::PointCloud<PointT>::Ptr& input)
+    {
+        pcl::PointCloud<pcl::PointXYZI>::Ptr output(new pcl::PointCloud<pcl::PointXYZI>);
+        output->resize(input->size());
+        for (size_t i = 0; i < input->size(); ++i) {
+            output->points[i].x = input->points[i].x;
+            output->points[i].y = input->points[i].y;
+            output->points[i].z = input->points[i].z;
+            output->points[i].intensity = 0.5f; // 默认强度值
+        }
+        return output;
+    }
+
     // ========================================================================
-    // 滤波方法 (10 种)
+    // 滤波方法 (10 种) —— 与原始版本完全相同
     // ========================================================================
 
     /**
      * @brief 直通滤波：沿指定轴保留在 [min, max] 范围内的点。
-     * @param input 输入点云
-     * @param field 滤波轴名称 ("x", "y", "z" 等)
-     * @param min 下限
-     * @param max 上限
-     * @return 滤波后的点云
      */
     pcl::PointCloud<PointT>::Ptr filterPassThrough(const pcl::PointCloud<PointT>::Ptr& input,
                                                    const std::string& field,
@@ -348,13 +394,10 @@ private:
 
     /**
      * @brief 条件滤波：保留满足所有条件（X>0 && Y>0 && Z>0）的点。
-     * @param input 输入点云
-     * @return 滤波后的点云
      */
     pcl::PointCloud<PointT>::Ptr filterConditional(const pcl::PointCloud<PointT>::Ptr& input)
     {
         pcl::PointCloud<PointT>::Ptr out(new pcl::PointCloud<PointT>);
-        // 创建“与”条件：X>0, Y>0, Z>0
         pcl::ConditionAnd<PointT>::Ptr cond(new pcl::ConditionAnd<PointT>);
         cond->addComparison(pcl::FieldComparison<PointT>::ConstPtr(
             new pcl::FieldComparison<PointT>("x", pcl::ComparisonOps::GT, 0.0)));
@@ -372,12 +415,7 @@ private:
     }
 
     /**
-     * @brief 统计滤波：对于每个点，计算其到 k 个近邻的平均距离。
-     *        若该距离大于全局平均距离的 stddev 倍标准差，则视为离群点剔除。
-     * @param input 输入点云
-     * @param meanK 用于统计的近邻点数
-     * @param stddev 标准差倍数阈值
-     * @return 滤波后的点云
+     * @brief 统计滤波：基于邻域统计特性剔除离群点。
      */
     pcl::PointCloud<PointT>::Ptr filterStatisticalOutlier(const pcl::PointCloud<PointT>::Ptr& input,
                                                           int meanK, float stddev)
@@ -394,11 +432,7 @@ private:
     }
 
     /**
-     * @brief 半径滤波：对于每个点，若其指定半径内的邻居数少于 minNeighbors，则剔除。
-     * @param input 输入点云
-     * @param radius 搜索半径
-     * @param minNeighbors 最少邻居数
-     * @return 滤波后的点云
+     * @brief 半径滤波：剔除指定半径内邻居数不足的点。
      */
     pcl::PointCloud<PointT>::Ptr filterRadiusOutlier(const pcl::PointCloud<PointT>::Ptr& input,
                                                      float radius, int minNeighbors)
@@ -415,11 +449,7 @@ private:
     }
 
     /**
-     * @brief 体素滤波：将点云划分为体素网格，每个体素内用质心代替所有点。
-     *        同时可以达到降采样的效果。
-     * @param input 输入点云
-     * @param leaf 体素边长
-     * @return 滤波后的点云
+     * @brief 体素滤波：体素网格下采样，用质心代表点。
      */
     pcl::PointCloud<PointT>::Ptr filterVoxel(const pcl::PointCloud<PointT>::Ptr& input, float leaf)
     {
@@ -433,11 +463,7 @@ private:
     }
 
     /**
-     * @brief 近似体素滤波：体素网格下采样的快速近似版本。
-     *        不计算质心，直接用体素中心点坐标替代，速度更快。
-     * @param input 输入点云
-     * @param leaf 体素边长
-     * @return 滤波后的点云
+     * @brief 近似体素滤波：快速近似版本。
      */
     pcl::PointCloud<PointT>::Ptr filterApproxVoxel(const pcl::PointCloud<PointT>::Ptr& input, float leaf)
     {
@@ -451,15 +477,11 @@ private:
     }
 
     /**
-     * @brief 投影滤波：将点云投影到指定的几何模型上。
-     *        本例投影到 z=0 平面（XOY 平面）。
-     * @param input 输入点云
-     * @return 投影后的点云（所有点 z 坐标变为 0）
+     * @brief 投影滤波：将点投影到 z=0 平面。
      */
     pcl::PointCloud<PointT>::Ptr filterProjection(const pcl::PointCloud<PointT>::Ptr& input)
     {
         pcl::PointCloud<PointT>::Ptr out(new pcl::PointCloud<PointT>);
-        // 定义平面模型系数：Ax+By+Cz+D=0，此处为 z=0 → A=0, B=0, C=1, D=0
         pcl::ModelCoefficients::Ptr coeff(new pcl::ModelCoefficients);
         coeff->values.resize(4);
         coeff->values[0] = 0.0;
@@ -477,17 +499,13 @@ private:
     }
 
     /**
-     * @brief 裁剪盒滤波：保留指定长方体区域内的点。
-     *        本例保留 [-3,3]×[-3,3]×[-3,3] 范围内的点。
-     * @param input 输入点云
-     * @return 裁剪后的点云
+     * @brief 裁剪盒滤波：保留 [-3,3]×[-3,3]×[-3,3] 范围内的点。
      */
     pcl::PointCloud<PointT>::Ptr filterCropBox(const pcl::PointCloud<PointT>::Ptr& input)
     {
         pcl::PointCloud<PointT>::Ptr out(new pcl::PointCloud<PointT>);
         pcl::CropBox<PointT> f;
         f.setInputCloud(input);
-        // 设置包围盒最小角和最大角（第四个分量为 1，表示齐次坐标）
         f.setMin(Eigen::Vector4f(-3, -3, -3, 1));
         f.setMax(Eigen::Vector4f( 3,  3,  3, 1));
         f.filter(*out);
@@ -497,32 +515,28 @@ private:
 
     /**
      * @brief 裁剪凸包滤波：利用点云构建凸包，保留凸包内部的点。
-     * @param input 输入点云
-     * @return 裁剪后的点云
      */
     pcl::PointCloud<PointT>::Ptr filterCropHull(const pcl::PointCloud<PointT>::Ptr& input)
     {
         pcl::PointCloud<PointT>::Ptr out(new pcl::PointCloud<PointT>);
 
-        // 1. 构建凸包
         pcl::ConvexHull<PointT> hull;
         hull.setInputCloud(input);
-        std::vector<pcl::Vertices> polygons;          // 存储凸包多边形的顶点索引
+        std::vector<pcl::Vertices> polygons;
         pcl::PointCloud<PointT>::Ptr surface_hull(new pcl::PointCloud<PointT>);
-        hull.reconstruct(*surface_hull, polygons);    // 重建凸包表面
+        hull.reconstruct(*surface_hull, polygons);
 
         if (surface_hull->empty())
         {
             RCLCPP_WARN(this->get_logger(), "凸包构建失败，跳过裁剪凸包");
-            return input;   // 若失败，返回原始点云
+            return input;
         }
 
-        // 2. 使用凸包裁剪点云
         pcl::CropHull<PointT> f;
         f.setInputCloud(input);
-        f.setHullIndices(polygons);                   // 设置凸包多边形索引
-        f.setHullCloud(surface_hull);                 // 设置凸包点云
-        f.setDim(3);                                  // 三维
+        f.setHullIndices(polygons);
+        f.setHullCloud(surface_hull);
+        f.setDim(3);
         f.filter(*out);
 
         RCLCPP_INFO(this->get_logger(), "裁剪凸包滤波 -> %zu 点", out->size());
@@ -530,19 +544,14 @@ private:
     }
 
     /**
-     * @brief 视锥裁剪：模拟相机视锥，保留视锥内部的点。
-     *        本例设置相机位于原点，朝向 Z 正方向，水平视场角 60°，垂直 45°，近平面 0.1，远平面 10.0。
-     * @param input 输入点云
-     * @return 裁剪后的点云
+     * @brief 视锥裁剪：模拟相机视锥，保留视锥内的点。
      */
     pcl::PointCloud<PointT>::Ptr filterFrustumCulling(const pcl::PointCloud<PointT>::Ptr& input)
     {
         pcl::PointCloud<PointT>::Ptr out(new pcl::PointCloud<PointT>);
         pcl::FrustumCulling<PointT> f;
         f.setInputCloud(input);
-        // 设置相机位姿（单位矩阵表示位于原点，无旋转）
         f.setCameraPose(Eigen::Matrix4f::Identity());
-        // 设置视锥参数（角度需转为弧度）
         f.setHorizontalFOV(60.0f * M_PI / 180.0f);
         f.setVerticalFOV(45.0f * M_PI / 180.0f);
         f.setNearPlaneDistance(0.1f);
@@ -553,15 +562,11 @@ private:
     }
 
     // ========================================================================
-    // 降采样方法 (4 种)
+    // 降采样方法 (4 种) —— 与原始版本完全相同
     // ========================================================================
 
     /**
-     * @brief 体素降采样：与体素滤波相同，用体素质心代表点。
-     *        这里单独列出以强调降采样用途。
-     * @param input 输入点云
-     * @param leaf 体素边长
-     * @return 降采样后的点云
+     * @brief 体素降采样。
      */
     pcl::PointCloud<PointT>::Ptr downsampleVoxel(const pcl::PointCloud<PointT>::Ptr& input, float leaf)
     {
@@ -576,10 +581,7 @@ private:
     }
 
     /**
-     * @brief 近似体素降采样：快速近似版本。
-     * @param input 输入点云
-     * @param leaf 体素边长
-     * @return 降采样后的点云
+     * @brief 近似体素降采样。
      */
     pcl::PointCloud<PointT>::Ptr downsampleApproxVoxel(const pcl::PointCloud<PointT>::Ptr& input, float leaf)
     {
@@ -594,11 +596,7 @@ private:
     }
 
     /**
-     * @brief 均匀采样：将点云划分为体素，每个体素内保留距离体素中心最近的原始点。
-     *        与体素降采样不同，它保留的是原始点坐标而非质心。
-     * @param input 输入点云
-     * @param radius 体素半径（实际为搜索半径）
-     * @return 降采样后的点云
+     * @brief 均匀采样：保留每个体素内最接近中心的原始点。
      */
     pcl::PointCloud<PointT>::Ptr downsampleUniform(const pcl::PointCloud<PointT>::Ptr& input, float radius)
     {
@@ -613,10 +611,7 @@ private:
     }
 
     /**
-     * @brief 随机采样：从输入点云中随机选择指定数量的点。
-     * @param input 输入点云
-     * @param sample 采样点数
-     * @return 降采样后的点云
+     * @brief 随机采样：随机选择指定数量的点。
      */
     pcl::PointCloud<PointT>::Ptr downsampleRandom(const pcl::PointCloud<PointT>::Ptr& input, unsigned int sample)
     {
@@ -631,23 +626,114 @@ private:
     }
 
     // ========================================================================
-    // Kd‑tree 应用
+    // 关键点提取方法 (4 种)
+    // ========================================================================
+
+    /**
+     * @brief SIFT 关键点提取。
+     *        原理：构建尺度空间，在 DoG 金字塔中检测极值点。
+     *        适用：需尺度和旋转不变性的物体识别和点云匹配。
+     *        注意：输入点云需包含强度信息（PointXYZI）。
+     * @param input 输入点云（PointXYZI）
+     * @return SIFT 关键点（PointWithScale，包含尺度和响应值）
+     */
+    pcl::PointCloud<pcl::PointWithScale>::Ptr extractSIFTKeypoints(
+        const pcl::PointCloud<pcl::PointXYZI>::Ptr& input)
+    {
+        RCLCPP_INFO(this->get_logger(), "=== 提取 SIFT 关键点 ===");
+        pcl::PointCloud<pcl::PointWithScale>::Ptr keypoints(new pcl::PointCloud<pcl::PointWithScale>);
+        pcl::SIFTKeypoint<pcl::PointXYZI, pcl::PointWithScale> sift;
+        pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>());
+        sift.setSearchMethod(tree);
+        sift.setInputCloud(input);
+        sift.setScales(0.5f, 3, 4);          // 最小尺度0.5，3个八度，每八度4个尺度
+        sift.setMinimumContrast(0.01f);        // 最小对比度阈值
+        sift.compute(*keypoints);
+        RCLCPP_INFO(this->get_logger(), "SIFT 关键点: %zu", keypoints->points.size());
+        return keypoints;
+    }
+
+    /**
+     * @brief Harris3D 关键点提取。
+     *        原理：利用点云法向量信息检测角点，是 2D Harris 的 3D 推广。
+     *        适用：结构化场景中的角点检测，如工业零件质检。
+     * @param input 输入点云（PointXYZ）
+     * @return Harris 关键点（PointXYZI，强度值表示响应强度）
+     */
+    pcl::PointCloud<pcl::PointXYZI>::Ptr extractHarrisKeypoints(
+        const pcl::PointCloud<PointT>::Ptr& input)
+    {
+        RCLCPP_INFO(this->get_logger(), "=== 提取 Harris3D 关键点 ===");
+        pcl::PointCloud<pcl::PointXYZI>::Ptr keypoints(new pcl::PointCloud<pcl::PointXYZI>);
+        pcl::HarrisKeypoint3D<PointT, pcl::PointXYZI> harris;
+        harris.setInputCloud(input);
+        harris.setRadius(0.5f);               // 搜索半径
+        harris.setNonMaxSupression(true);      // 非极大值抑制
+        harris.setThreshold(0.0001f);          // 响应值阈值
+        harris.compute(*keypoints);
+        RCLCPP_INFO(this->get_logger(), "Harris 关键点: %zu", keypoints->points.size());
+        return keypoints;
+    }
+
+    /**
+     * @brief ISS (Intrinsic Shape Signatures) 关键点提取。
+     *        原理：分析邻域协方差矩阵的特征值，通过显著性度量筛选关键点。
+     *        适用：对噪声有一定鲁棒性，适用于 3D 物体识别和形状分析。
+     * @param input 输入点云（PointXYZ）
+     * @return ISS 关键点（PointXYZ）
+     */
+    pcl::PointCloud<pcl::PointXYZ>::Ptr extractISSKeypoints(
+        const pcl::PointCloud<PointT>::Ptr& input)
+    {
+        RCLCPP_INFO(this->get_logger(), "=== 提取 ISS 关键点 ===");
+        pcl::PointCloud<pcl::PointXYZ>::Ptr keypoints(new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::ISSKeypoint3D<PointT, pcl::PointXYZ> iss;
+        iss.setInputCloud(input);
+        iss.setSalientRadius(0.5f);           // 显著区域半径
+        iss.setNonMaxRadius(0.2f);            // 非极大值抑制半径
+        iss.setThreshold21(0.7f);              // 特征值比值阈值 (λ2/λ1)
+        iss.setThreshold32(0.7f);              // 特征值比值阈值 (λ3/λ2)
+        iss.setMinNeighbors(5);                // 最小邻居数
+        iss.compute(*keypoints);
+        RCLCPP_INFO(this->get_logger(), "ISS 关键点: %zu", keypoints->points.size());
+        return keypoints;
+    }
+
+    /**
+     * @brief AGAST 2D 关键点提取。
+     *        原理：快速的 2D 角点检测算法，是 FAST 的改进版。
+     *        适用：实时性要求高的 2D 特征提取。
+     *        注意：输入为 PointXYZ，输出为 PointUV（图像坐标）。
+     * @param input 输入点云（PointXYZ）
+     * @return AGAST 关键点（PointUV，图像坐标系下的 2D 坐标）
+     */
+    pcl::PointCloud<pcl::PointUV>::Ptr extractAGASTKeypoints(
+        const pcl::PointCloud<PointT>::Ptr& input)
+    {
+        RCLCPP_INFO(this->get_logger(), "=== 提取 AGAST 2D 关键点 ===");
+        pcl::PointCloud<pcl::PointUV>::Ptr keypoints(new pcl::PointCloud<pcl::PointUV>);
+        pcl::AgastKeypoint2D<PointT, pcl::PointUV> agast;
+        agast.setInputCloud(input);
+        agast.setThreshold(30);                // 检测阈值
+        agast.compute(*keypoints);
+        RCLCPP_INFO(this->get_logger(), "AGAST 关键点: %zu", keypoints->points.size());
+        return keypoints;
+    }
+
+    // ========================================================================
+    // Kd‑tree 应用 —— 与原始版本完全相同
     // ========================================================================
 
     /**
      * @brief 对输入点云构建 Kd‑tree，并执行 K 近邻和半径搜索。
-     *        搜索一个随机查询点，将结果打印到终端。
-     * @param cloud 输入点云
      */
     void performKdTreeSearch(const pcl::PointCloud<PointT>::Ptr& cloud)
     {
         RCLCPP_INFO(this->get_logger(), "=== Kd‑tree 搜索 ===");
 
-        // 1. 构建 Kd‑tree（使用 FLANN 实现）
         pcl::KdTreeFLANN<PointT> kdtree;
         kdtree.setInputCloud(cloud);
 
-        // 2. 生成一个随机查询点（在点云范围内）
         PointT searchPoint;
         searchPoint.x = (rand() % 2000 - 1000) / 100.0f;
         searchPoint.y = (rand() % 2000 - 1000) / 100.0f;
@@ -655,10 +741,9 @@ private:
         RCLCPP_INFO(this->get_logger(), "查询点: (%.2f, %.2f, %.2f)",
                     searchPoint.x, searchPoint.y, searchPoint.z);
 
-        // 3. K近邻搜索（K=10）
         int K = 10;
-        std::vector<int> pointIdxKNNSearch(K);          // 存储邻居的索引
-        std::vector<float> pointKNNSquaredDistance(K);  // 存储对应的平方距离
+        std::vector<int> pointIdxKNNSearch(K);
+        std::vector<float> pointKNNSquaredDistance(K);
         if (kdtree.nearestKSearch(searchPoint, K, pointIdxKNNSearch, pointKNNSquaredDistance) > 0)
         {
             RCLCPP_INFO(this->get_logger(), "K近邻搜索 (K=%d) 找到 %zu 个邻居:", K, pointIdxKNNSearch.size());
@@ -669,14 +754,12 @@ private:
             }
         }
 
-        // 4. 半径搜索（半径=2.0）
         float radius = 2.0f;
         std::vector<int> pointIdxRadiusSearch;
         std::vector<float> pointRadiusSquaredDistance;
         if (kdtree.radiusSearch(searchPoint, radius, pointIdxRadiusSearch, pointRadiusSquaredDistance) > 0)
         {
             RCLCPP_INFO(this->get_logger(), "半径搜索 (radius=%.2f) 找到 %zu 个邻居:", radius, pointIdxRadiusSearch.size());
-            // 为避免刷屏，最多打印前 5 个
             for (size_t i = 0; i < std::min(pointIdxRadiusSearch.size(), (size_t)5); ++i)
             {
                 RCLCPP_INFO(this->get_logger(), "  邻居 %zu: 索引=%d, 距离²=%.2f",
@@ -688,26 +771,21 @@ private:
     }
 
     // ========================================================================
-    // Octree 应用
+    // Octree 应用 —— 与原始版本完全相同
     // ========================================================================
 
     /**
      * @brief 对输入点云构建八叉树，并执行体素内搜索、K近邻和半径搜索。
-     *        搜索结果打印到终端。
-     * @param cloud 输入点云
      */
     void performOctreeSearch(const pcl::PointCloud<PointT>::Ptr& cloud)
     {
         RCLCPP_INFO(this->get_logger(), "=== Octree 搜索 ===");
 
-        float resolution = 0.5f; // 八叉树体素边长
-
-        // 1. 构建 Octree
+        float resolution = 0.5f;
         pcl::octree::OctreePointCloudSearch<PointT> octree(resolution);
         octree.setInputCloud(cloud);
         octree.addPointsFromInputCloud();
 
-        // 2. 生成随机查询点
         PointT searchPoint;
         searchPoint.x = (rand() % 2000 - 1000) / 100.0f;
         searchPoint.y = (rand() % 2000 - 1000) / 100.0f;
@@ -715,7 +793,6 @@ private:
         RCLCPP_INFO(this->get_logger(), "查询点: (%.2f, %.2f, %.2f)",
                     searchPoint.x, searchPoint.y, searchPoint.z);
 
-        // 3. 体素内搜索（查找同一体素内的所有点）
         std::vector<int> pointIdxVec;
         if (octree.voxelSearch(searchPoint, pointIdxVec))
         {
@@ -726,7 +803,6 @@ private:
                 RCLCPP_INFO(this->get_logger(), "  ... 还有 %zu 个点", pointIdxVec.size() - 5);
         }
 
-        // 4. K近邻搜索（K=10）
         int K = 10;
         std::vector<int> pointIdxKNNSearch;
         std::vector<float> pointKNNSquaredDistance;
@@ -740,7 +816,6 @@ private:
             }
         }
 
-        // 5. 半径搜索（半径=2.0）
         float radius = 2.0f;
         std::vector<int> pointIdxRadiusSearch;
         std::vector<float> pointRadiusSquaredDistance;
@@ -759,8 +834,6 @@ private:
 
     /**
      * @brief 使用 Octree 进行空间变化检测，比较两个点云，找出新增的点。
-     * @param cloudA 基准点云
-     * @param cloudB 比较点云（可能包含新点）
      */
     void performOctreeChangeDetection(const pcl::PointCloud<PointT>::Ptr& cloudA,
                                       const pcl::PointCloud<PointT>::Ptr& cloudB)
@@ -768,26 +841,17 @@ private:
         RCLCPP_INFO(this->get_logger(), "=== Octree 空间变化检测 ===");
 
         float resolution = 0.5f;
-
-        // 使用变化检测器
         pcl::octree::OctreePointCloudChangeDetector<PointT> octree(resolution);
         octree.setInputCloud(cloudA);
         octree.addPointsFromInputCloud();
-
-        // 切换缓冲区，准备检测变化
         octree.switchBuffers();
-
-        // 添加第二个点云
         octree.setInputCloud(cloudB);
         octree.addPointsFromInputCloud();
 
-        // 获取变化的点索引（在 cloudB 中但不在 cloudA 中的点）
         std::vector<int> newPointIdxVector;
         octree.getPointIndicesFromNewVoxels(newPointIdxVector);
 
-        RCLCPP_INFO(this->get_logger(), "空间变化检测: 发现 %zu 个新点（在 cloudB 中存在但 cloudA 中不存在）",
-                    newPointIdxVector.size());
-        // 打印前 10 个新点的坐标
+        RCLCPP_INFO(this->get_logger(), "空间变化检测: 发现 %zu 个新点", newPointIdxVector.size());
         for (size_t i = 0; i < std::min(newPointIdxVector.size(), (size_t)10); ++i)
         {
             const auto& p = cloudB->points[newPointIdxVector[i]];
@@ -799,41 +863,32 @@ private:
 
     /**
      * @brief 使用 Octree 对点云进行压缩和解压，打印压缩比并保存解压结果。
-     * @param cloud 输入点云
      */
     void performOctreeCompression(const pcl::PointCloud<PointT>::Ptr& cloud)
     {
         RCLCPP_INFO(this->get_logger(), "=== Octree 点云压缩 ===");
 
-        // 选择压缩配置文件（中分辨率、在线压缩、不带颜色）
-        // 注意：compression_Profiles_e 位于 pcl::io 命名空间
         pcl::io::compression_Profiles_e compressionProfile =
             pcl::io::MED_RES_ONLINE_COMPRESSION_WITHOUT_COLOR;
 
-        // 创建压缩器对象，使用 pcl::io::OctreePointCloudCompression
-        // 第二个参数为 false 表示不显示编码/解码细节
         pcl::io::OctreePointCloudCompression<PointT> compression(compressionProfile, false);
 
-        // 1. 压缩点云到字符串流
         std::stringstream compressedData;
         compression.encodePointCloud(cloud, compressedData);
 
-        // 计算压缩比
         size_t originalSize = cloud->points.size() * sizeof(PointT);
         size_t compressedSize = compressedData.str().size();
         RCLCPP_INFO(this->get_logger(), "压缩前大小: %zu 字节, 压缩后大小: %zu 字节, 压缩比: %.2f%%",
                     originalSize, compressedSize,
                     (compressedSize > 0) ? (float)compressedSize / originalSize * 100 : 0.0);
 
-        // 2. 解压点云
         pcl::PointCloud<PointT>::Ptr decompressedCloud(new pcl::PointCloud<PointT>);
         compression.decodePointCloud(compressedData, decompressedCloud);
 
         RCLCPP_INFO(this->get_logger(), "解压后点云点数: %zu (原始: %zu)",
                     decompressedCloud->points.size(), cloud->points.size());
 
-        // 保存解压后的点云，方便用 pcl_viewer 查看压缩效果
-        savePointCloud(decompressedCloud, "decompressed_cloud.pcd");
+        savePointCloud(*decompressedCloud, "decompressed_cloud.pcd");
     }
 
     // ========================================================================
@@ -841,28 +896,28 @@ private:
     // ========================================================================
 
     /**
-     * @brief 将所有存储的点云（原始、滤波、降采样）发布到对应的话题。
-     *        使用 lambda 简化重复代码。
+     * @brief 将所有存储的点云（原始、滤波、降采样、关键点）发布到对应的话题。
+     *        使用泛型 lambda 支持不同点类型。
      */
     void publishAllClouds()
     {
-        // 定义一个 lambda，功能：转换点云为 ROS2 消息并发布
-        auto pub = [this](const pcl::PointCloud<PointT>::Ptr& cloud,
+        // 泛型 lambda：接受任何点云类型
+        auto pub = [this](const auto& cloud,
                           rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher,
                           const std::string& frame = "map")
         {
-            if (!cloud || cloud->empty()) return;      // 空点云不发布
+            if (!cloud || cloud->empty()) return;
             sensor_msgs::msg::PointCloud2 msg;
-            pcl::toROSMsg(*cloud, msg);                // 转换
-            msg.header.frame_id = frame;               // 设置坐标系
-            msg.header.stamp = this->now();            // 设置当前时间戳
-            publisher->publish(msg);                   // 发布
+            pcl::toROSMsg(*cloud, msg);
+            msg.header.frame_id = frame;
+            msg.header.stamp = this->now();
+            publisher->publish(msg);
         };
 
-        // 发布原始点云
+        // 原始点云
         pub(original_cloud_, pub_original_);
 
-        // 发布 10 种滤波结果
+        // 10 种滤波结果
         pub(filtered_pass_through_, pub_pass_through_);
         pub(filtered_conditional_, pub_conditional_);
         pub(filtered_statistical_, pub_statistical_);
@@ -874,11 +929,17 @@ private:
         pub(filtered_crop_hull_, pub_crop_hull_);
         pub(filtered_frustum_, pub_frustum_);
 
-        // 发布 4 种降采样结果
+        // 4 种降采样结果
         pub(downsampled_voxel_, pub_down_voxel_);
         pub(downsampled_approx_voxel_, pub_down_approx_voxel_);
         pub(downsampled_uniform_, pub_down_uniform_);
         pub(downsampled_random_, pub_down_random_);
+
+        // 4 种关键点结果
+        pub(keypoints_sift_, pub_keypoints_sift_);
+        pub(keypoints_harris_, pub_keypoints_harris_);
+        pub(keypoints_iss_, pub_keypoints_iss_);
+        pub(keypoints_agast_, pub_keypoints_agast_);
     }
 };
 
@@ -887,13 +948,9 @@ private:
 // ============================================================================
 int main(int argc, char** argv)
 {
-    // 初始化 ROS2
     rclcpp::init(argc, argv);
-    // 创建节点对象
     auto node = std::make_shared<PCLDemo1Node>();
-    // 进入事件循环（阻塞），等待定时器回调
     rclcpp::spin(node);
-    // 正常退出
     rclcpp::shutdown();
     return 0;
 }
